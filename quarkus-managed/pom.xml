@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>ee.omnifish.arquillian</groupId>
+        <artifactId>quarkus-containers-main</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>arquillian-quarkus-managed</artifactId>
+
+    <name>Arquillian Quarkus managed container</name>
+    <description>
+        Arquillian container that builds each deployment into a production
+        Quarkus application and runs it in its own
+        JVM process, so the server and the tests don't share classes, static
+        state or system properties.
+    </description>
+
+    <dependencies>
+        <!--
+            Builds the application. Optional, so not passed on to users: these and their dependencies (Maven Resolver,
+            Maven model, Plexus, ...) are embedded as nested jars under META-INF/quarkus-bootstrap/ (see the
+            maven-dependency-plugin below) and loaded in an isolated class loader, so they don't end up on the test
+            class path.
+        -->
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-bootstrap-core</artifactId>
+            <version>${quarkus.version}</version>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-bootstrap-maven-resolver</artifactId>
+            <version>${quarkus.version}</version>
+            <optional>true</optional>
+        </dependency>
+
+        <!-- Provided by the test environment that uses this container -->
+        <dependency>
+            <groupId>org.jboss.arquillian.container</groupId>
+            <artifactId>arquillian-container-spi</artifactId>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.jboss.arquillian.core</groupId>
+            <artifactId>arquillian-core-spi</artifactId>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.jboss.arquillian.core</groupId>
+            <artifactId>arquillian-core-api</artifactId>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.jboss.shrinkwrap</groupId>
+            <artifactId>shrinkwrap-api</artifactId>
+            <version>1.2.6</version>
+            <scope>provided</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!--
+                Embed the Quarkus bootstrap and all its dependencies as nested jars. They're loaded at runtime in an
+                isolated class loader (see IsolatedQuarkusBootstrap), instead of being dependencies of this jar.
+            -->
+            <plugin>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>embed-quarkus-bootstrap</id>
+                        <phase>process-resources</phase>
+                        <goals>
+                            <goal>copy-dependencies</goal>
+                        </goals>
+                        <configuration>
+                            <includeScope>runtime</includeScope>
+                            <outputDirectory>${project.build.outputDirectory}/META-INF/quarkus-bootstrap</outputDirectory>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+
+        </plugins>
+    </build>
+</project>

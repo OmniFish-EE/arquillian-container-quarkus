@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>ee.omnifish.arquillian</groupId>
+        <artifactId>quarkus-integration-tests</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>helloworld-faces-native</artifactId>
+
+    <name>Arquillian Container for Quarkus - Integration Tests - Hello world Faces (native)</name>
+
+    <dependencies>
+        <dependency>
+            <groupId>jakarta.enterprise</groupId>
+            <artifactId>jakarta.enterprise.cdi-api</artifactId>
+            <version>4.1.0</version>
+            <scope>provided</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <systemPropertyVariables>
+                        <!-- Build and run the application as a native executable (needs GraalVM, e.g. GRAALVM_HOME) -->
+                        <arquillian.quarkus.nativeImage>true</arquillian.quarkus.nativeImage>
+
+                        <!-- The Quarkus extensions the application is built with: Jakarta Faces by Apache MyFaces -->
+                        <arquillian.quarkus.dependencies>org.apache.myfaces.core.extensions.quarkus:myfaces-quarkus:4.1.4</arquillian.quarkus.dependencies>
+                    </systemPropertyVariables>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

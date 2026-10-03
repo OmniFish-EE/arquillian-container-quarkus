@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>ee.omnifish.arquillian</groupId>
+        <artifactId>quarkus-integration-tests</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>helloworld-war-native</artifactId>
+
+    <name>Arquillian Container for Quarkus - Integration Tests - Hello world WAR (native)</name>
+
+    <dependencies>
+        <dependency>
+            <groupId>jakarta.ws.rs</groupId>
+            <artifactId>jakarta.ws.rs-api</artifactId>
+            <version>3.1.0</version>
+            <scope>provided</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <systemPropertyVariables>
+                        <!-- Build and run the application as a native executable (needs GraalVM, e.g. GRAALVM_HOME) -->
+                        <arquillian.quarkus.nativeImage>true</arquillian.quarkus.nativeImage>
+
+                        <!-- The Quarkus extensions the application is built with -->
+                        <arquillian.quarkus.dependencies>io.quarkus:quarkus-rest-servlet</arquillian.quarkus.dependencies>
+
+                        <!--
+                            Deploy at / instead of at /<archive name>: quarkus-rest-servlet (3.40) doesn't strip the
+                            servlet context path when matching resources, and every request then fails with a
+                            NullPointerException ("initialMatch" is null) instead of reaching the resource.
+                        -->
+                        <arquillian.quarkus.contextRootFromArchiveName>false</arquillian.quarkus.contextRootFromArchiveName>
+                    </systemPropertyVariables>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>
