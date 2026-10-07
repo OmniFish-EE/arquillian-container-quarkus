@@ -14,7 +14,11 @@ For every deployment, the container:
    * `WEB-INF/classes` becomes the application root;
    * `WEB-INF/web.xml`, `web-fragment.xml` and `beans.xml` move to `META-INF/`;
    * the web root moves to `META-INF/resources`;
-   * the `WEB-INF/lib` jars become additional application archives;
+   * the `WEB-INF/lib` jars become dependencies of the application, indexed so their annotations are found, as a
+     Servlet container scans `WEB-INF/lib` (jars with only `jakarta.*` or `java.*` classes are left out, as Quarkus
+     provides those APIs). Libraries ShrinkWrap exported as directories are packaged as jars again. The jars are also
+     kept in `WEB-INF/lib` of the application, so it can read them as resources (e.g. a taglib URI that names the jar
+     with the TLD);
  * builds the application with the Quarkus bootstrap, using the configured extensions, with versions managed by the
    Quarkus BOM;
  * starts it on a free port (by default) and waits until it accepts connections;
@@ -33,7 +37,7 @@ an isolated class loader, so they don't end up on the test class path.
  <dependency>
     <groupId>ee.omnifish.arquillian</groupId>
     <artifactId>arquillian-quarkus-managed</artifactId>
-    <version>1.0.0-SNAPSHOT</version>
+    <version>1.1.0-SNAPSHOT</version>
     <scope>test</scope>
  </dependency>
 ```

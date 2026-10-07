@@ -15,7 +15,6 @@
  */
 package ee.omnifish.arquillian.container.quarkus.bootstrap;
 
-import io.quarkus.bootstrap.app.AdditionalDependency;
 import io.quarkus.bootstrap.app.AugmentResult;
 import io.quarkus.bootstrap.app.CuratedApplication;
 import io.quarkus.bootstrap.app.QuarkusBootstrap;
@@ -31,12 +30,16 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Enumeration;
 import java.util.List;
 import java.util.Properties;
+import java.util.jar.JarEntry;
+import java.util.jar.JarFile;
 
 import org.eclipse.aether.DefaultRepositorySystemSession;
 
 import static ee.omnifish.arquillian.container.quarkus.bootstrap.ApplicationWorkspaceReader.GROUP_ID;
+import static ee.omnifish.arquillian.container.quarkus.bootstrap.ApplicationWorkspaceReader.LIBRARY_GROUP_ID;
 import static ee.omnifish.arquillian.container.quarkus.bootstrap.ApplicationWorkspaceReader.VERSION;
 import static io.quarkus.bootstrap.app.QuarkusBootstrap.Mode.PROD;
 import static io.quarkus.maven.dependency.ArtifactCoords.TYPE_JAR;
@@ -65,7 +68,7 @@ public final class QuarkusApplicationBuilder {
      * @param name the base name of the application
      * @param application the application root (classes and resources)
      * @param workDirectory the directory to build in
-     * @param libraries additional application archives (e.g. the jars from WEB-INF/lib)
+     * @param libraries libraries of the application (e.g. the jars from WEB-INF/lib)
      * @param dependencies extensions and libraries as {@code groupId:artifactId[:version]}
      * @param quarkusVersion the version of the Quarkus BOM, or null for the version of this bootstrap
      * @param buildProperties Quarkus build time configuration
@@ -78,6 +81,11 @@ public final class QuarkusApplicationBuilder {
 
         String version = quarkusVersion != null ? quarkusVersion : bootstrapQuarkusVersion();
         WORKSPACE_READER.setApplication(name, application, workDirectory);
+
+        List<Dependency> forcedDependencies = toDependencies(dependencies, version);
+        Properties allBuildProperties = new Properties();
+        allBuildProperties.putAll(buildProperties);
+        addLibraries(libraries, forcedDependencies, allBuildProperties);
 
         QuarkusBootstrap.Builder builder = QuarkusBootstrap.builder()
                 .setBaseClassLoader(QuarkusApplicationBuilder.class.getClassLoader())
@@ -94,14 +102,10 @@ public final class QuarkusApplicationBuilder {
                         VERSION,
                         application))
                 .setManagingProject(new GACTV("io.quarkus", "quarkus-bom", "", "pom", version))
-                .setForcedDependencies(toDependencies(dependencies, version))
+                .setForcedDependencies(forcedDependencies)
                 .setIsolateDeployment(true)
-                .setBuildSystemProperties(buildProperties)
+                .setBuildSystemProperties(allBuildProperties)
                 .setMode(PROD);
-
-        for (Path library : libraries) {
-            builder.addAdditionalApplicationArchive(new AdditionalDependency(library, false, false));
-        }
 
         try (CuratedApplication curatedApplication = builder.build().bootstrap()) {
             AugmentResult result = curatedApplication.createAugmentor().createProductionApplication();
@@ -111,6 +115,53 @@ public final class QuarkusApplicationBuilder {
 
             return result.getJar().getPath();
         }
+    }
+
+    /**
+     * Makes the libraries dependencies of the application, so they are packaged with it, and indexed, so annotations in
+     * them are found, the way a Servlet container scans the jars in WEB-INF/lib.
+     *
+     * <p>
+     * Libraries with only Jakarta (or Java) API classes are left out: Quarkus provides those APIs, and a Servlet
+     * container doesn't load these packages from a web application either.
+     */
+    private static void addLibraries(List<Path> libraries, List<Dependency> dependencies, Properties buildProperties) throws IOException {
+        int index = 0;
+        for (Path library : libraries) {
+            if (containsOnlyPlatformClasses(library)) {
+                continue;
+            }
+
+            String artifactId = WORKSPACE_READER.addLibrary(library);
+            dependencies.add(new ArtifactDependency(LIBRARY_GROUP_ID, artifactId, null, TYPE_JAR, VERSION));
+
+            String indexDependency = "quarkus.index-dependency.arquillian-library-" + index++;
+            buildProperties.setProperty(indexDependency + ".group-id", LIBRARY_GROUP_ID);
+            buildProperties.setProperty(indexDependency + ".artifact-id", artifactId);
+        }
+    }
+
+    /**
+     * @return true if the jar contains classes, all of them in jakarta.* or java.* packages
+     */
+    private static boolean containsOnlyPlatformClasses(Path jar) throws IOException {
+        boolean hasClasses = false;
+        try (JarFile jarFile = new JarFile(jar.toFile())) {
+            Enumeration<JarEntry> entries = jarFile.entries();
+            while (entries.hasMoreElements()) {
+                String name = entries.nextElement().getName();
+                if (!name.endsWith(".class") || name.endsWith("module-info.class") || name.startsWith("META-INF/")) {
+                    continue;
+                }
+
+                if (!name.startsWith("jakarta/") && !name.startsWith("java/")) {
+                    return false;
+                }
+                hasClasses = true;
+            }
+        }
+
+        return hasClasses;
     }
 
     private static List<Dependency> toDependencies(List<String> coordinatesList, String quarkusVersion) {
