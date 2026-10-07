@@ -19,6 +19,7 @@ import java.io.BufferedReader;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
@@ -32,6 +33,8 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Properties;
 import java.util.concurrent.TimeUnit;
+import java.util.jar.JarEntry;
+import java.util.jar.JarOutputStream;
 import java.util.stream.Stream;
 
 import org.jboss.arquillian.container.spi.client.container.DeployableContainer;
@@ -167,7 +170,9 @@ public class QuarkusManagedDeployableContainer implements DeployableContainer<Qu
      * <li>{@code WEB-INF/web.xml}, {@code WEB-INF/web-fragment.xml} and {@code WEB-INF/beans.xml} move to
      * {@code META-INF/}, where Quarkus looks for them;</li>
      * <li>the web root (everything outside WEB-INF and META-INF) moves to {@code META-INF/resources};</li>
-     * <li>{@code WEB-INF/lib} jars become additional application archives;</li>
+     * <li>{@code WEB-INF/lib} jars become libraries of the application (ShrinkWrap's exploded export turns a library
+     * added as archive into a directory, which is zipped into a jar again), and stay available as resources under
+     * {@code WEB-INF/lib};</li>
      * <li>everything else in {@code WEB-INF} and {@code META-INF} is kept.</li>
      * </ul>
      */
@@ -185,7 +190,15 @@ public class QuarkusManagedDeployableContainer implements DeployableContainer<Qu
         Path lib = webInf.resolve("lib");
         if (Files.isDirectory(lib)) {
             try (Stream<Path> jars = Files.list(lib)) {
-                jars.filter(jar -> jar.getFileName().toString().endsWith(".jar")).forEach(libraries::add);
+                for (Path jar : jars.filter(jar -> jar.getFileName().toString().endsWith(".jar")).toList()) {
+                    Path library = Files.isDirectory(jar) ? toJar(jar, war.resolveSibling("libraries")) : jar;
+                    libraries.add(library);
+
+                    // Also a web resource, as in a WAR: e.g. a JSP 1.1 taglib URI can name the jar with the TLD
+                    Path libraryResource = application.resolve("WEB-INF/lib").resolve(jar.getFileName().toString());
+                    Files.createDirectories(libraryResource.getParent());
+                    Files.copy(library, libraryResource, StandardCopyOption.REPLACE_EXISTING);
+                }
             }
         }
 
@@ -208,6 +221,31 @@ public class QuarkusManagedDeployableContainer implements DeployableContainer<Qu
                 }
             }
         }
+    }
+
+    /**
+     * Zips a library that was exported as directory into a jar with the same name.
+     */
+    private static Path toJar(Path directory, Path targetDirectory) throws IOException {
+        Path jar = Files.createDirectories(targetDirectory).resolve(directory.getFileName().toString());
+        try (OutputStream out = Files.newOutputStream(jar);
+             JarOutputStream jarOut = new JarOutputStream(out);
+             Stream<Path> paths = Files.walk(directory)) {
+            for (Path path : paths.sorted().toList()) {
+                if (path.equals(directory)) {
+                    continue;
+                }
+                String name = directory.relativize(path).toString().replace(File.separatorChar, '/');
+                if (Files.isDirectory(path)) {
+                    jarOut.putNextEntry(new JarEntry(name + "/"));
+                } else {
+                    jarOut.putNextEntry(new JarEntry(name));
+                    Files.copy(path, jarOut);
+                }
+                jarOut.closeEntry();
+            }
+        }
+        return jar;
     }
 
     private static void copyTree(Path source, Path target, Path skip) throws IOException {
