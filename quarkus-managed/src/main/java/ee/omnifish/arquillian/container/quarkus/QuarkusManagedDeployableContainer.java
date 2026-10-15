@@ -29,8 +29,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.TimeUnit;
 import java.util.jar.JarEntry;
@@ -69,9 +72,20 @@ public class QuarkusManagedDeployableContainer implements DeployableContainer<Qu
 
     private QuarkusManagedContainerConfiguration configuration;
 
-    private Process process;
-    private Path workDirectory;
-    private int port;
+    /** Arquillian's HTTPS context, which Arquillian versions before 1.11 don't have */
+    private static final String HTTPS_CONTEXT_CLASS = "org.jboss.arquillian.container.spi.client.protocol.metadata.HTTPSContext";
+
+    /** The password of the generated key store; it only protects a self-signed test certificate */
+    private static final String KEY_STORE_PASSWORD = "arquillian";
+
+    /**
+     * The applications that are deployed, by archive: Arquillian undeploys the archive instance it deployed. A test
+     * class can have several deployments, which run at the same time.
+     */
+    private final Map<Archive<?>, Application> applications = Collections.synchronizedMap(new IdentityHashMap<>());
+
+    /** Stops the applications that are still running when the test JVM exits without undeploying them. */
+    private Thread shutdownHook;
 
     @Override
     public Class<QuarkusManagedContainerConfiguration> getConfigurationClass() {
@@ -90,7 +104,27 @@ public class QuarkusManagedDeployableContainer implements DeployableContainer<Qu
 
     @Override
     public void stop() throws LifecycleException {
-        stopProcess();
+        RuntimeException failure = null;
+        for (Map.Entry<Archive<?>, Application> deployed : deployedApplications()) {
+            try {
+                // Removed only once stopped, so that the shutdown hook still kills it if the JVM exits meanwhile
+                cleanUp(deployed.getValue());
+            } catch (RuntimeException e) {
+                if (failure == null) {
+                    failure = e;
+                } else {
+                    failure.addSuppressed(e);
+                }
+            } finally {
+                applications.remove(deployed.getKey());
+            }
+        }
+
+        removeShutdownHook();
+
+        if (failure != null) {
+            throw new LifecycleException("Could not clean up all Quarkus applications", failure);
+        }
     }
 
     @Override
@@ -103,14 +137,15 @@ public class QuarkusManagedDeployableContainer implements DeployableContainer<Qu
     public ProtocolMetaData deploy(Archive<?> archive) throws DeploymentException {
         String name = archiveBaseName(archive);
         boolean isWar = archive instanceof WebArchive;
+        Application running = new Application(archive.getName());
 
         try {
-            workDirectory = Files.createTempDirectory("arquillian-quarkus-" + name + "-");
+            running.workDirectory = Files.createTempDirectory("arquillian-quarkus-" + name + "-");
 
-            Path exploded = workDirectory.resolve("exploded");
+            Path exploded = running.workDirectory.resolve("exploded");
             archive.as(ExplodedExporter.class).exportExplodedInto(exploded.toFile());
 
-            Path application = workDirectory.resolve("application");
+            Path application = running.workDirectory.resolve("application");
             List<Path> libraries = new ArrayList<>();
             if (isWar) {
                 toQuarkusLayout(exploded, application, libraries);
@@ -129,28 +164,60 @@ public class QuarkusManagedDeployableContainer implements DeployableContainer<Qu
                 addSystemPropertiesToNativeBuild(buildProperties);
             }
 
-            Path runner = build(name, application, libraries, buildProperties);
+            Path runner = build(name, application, running.workDirectory, libraries, buildProperties);
 
-            startProcess(runner);
+            if (configuration.getHttpsPort() >= 0) {
+                createKeyStore(running.workDirectory.resolve("https.p12"));
+            }
+
+            // Known before its process starts, so that the shutdown hook kills it if the JVM exits during startup
+            addShutdownHook();
+            applications.put(archive, running);
+            startProcess(running, runner);
 
             ProtocolMetaData metaData = new ProtocolMetaData();
-            HTTPContext httpContext = new HTTPContext("localhost", port);
+            HTTPContext httpContext = new HTTPContext("localhost", running.port);
             httpContext.add(new Servlet("default", contextRoot));
             metaData.addContext(httpContext);
 
+            if (running.httpsPort > 0) {
+                HTTPContext httpsContext = createHttpsContext("localhost", running.httpsPort);
+                if (httpsContext != null) {
+                    httpsContext.add(new Servlet("default", contextRoot));
+                    metaData.addContext(httpsContext);
+                }
+            }
+
             return metaData;
         } catch (DeploymentException e) {
-            cleanUp();
+            cleanUp(archive, running);
             throw e;
         } catch (Exception e) {
-            cleanUp();
+            cleanUp(archive, running);
             throw new DeploymentException("Could not deploy " + archive.getName() + " to Quarkus", e);
         }
     }
 
     @Override
     public void undeploy(Archive<?> archive) throws DeploymentException {
-        cleanUp();
+        Archive<?> key = archive;
+        Application running = applications.get(archive);
+
+        if (running == null) {
+            // Not the instance that was deployed: fall back to the archive's name
+            for (Map.Entry<Archive<?>, Application> deployed : deployedApplications()) {
+                if (deployed.getValue().name.equals(archive.getName())) {
+                    key = deployed.getKey();
+                    running = deployed.getValue();
+                    break;
+                }
+            }
+        }
+
+        if (running != null) {
+            // Removed only once stopped, so that the shutdown hook still kills it if the JVM exits meanwhile
+            cleanUp(key, running);
+        }
     }
 
     @Override
@@ -287,7 +354,7 @@ public class QuarkusManagedDeployableContainer implements DeployableContainer<Qu
      * Builds a production (fast-jar or native) application with the Quarkus bootstrap, which runs in its own class loader so that
      * it doesn't share libraries with the test class path; see {@link IsolatedQuarkusBootstrap}.
      */
-    private Path build(String name, Path application, List<Path> libraries, Properties buildProperties) throws Exception {
+    private Path build(String name, Path application, Path workDirectory, List<Path> libraries, Properties buildProperties) throws Exception {
         LOG.log(INFO, "Building Quarkus application {0} with {1}", name, configuration.getDependencyList());
 
         return IsolatedQuarkusBootstrap.build(
@@ -304,19 +371,24 @@ public class QuarkusManagedDeployableContainer implements DeployableContainer<Qu
      * Starts the application on the configured port or, when that is 0, on a free port. Another process may take a free
      * port before the application binds it; the application then exits, and is started again on another free port.
      */
-    private void startProcess(Path runner) throws Exception {
+    private void startProcess(Application running, Path runner) throws Exception {
         int configuredPort = configuration.getHttpPort();
-        if (configuredPort > 0) {
-            if (!isPortFree(configuredPort)) {
-                throw new DeploymentException("Port " + configuredPort + " is already in use");
+        int configuredHttpsPort = configuration.getHttpsPort();
+        for (int fixedPort : new int[] { configuredPort, configuredHttpsPort }) {
+            if (fixedPort > 0 && !isPortFree(fixedPort)) {
+                throw new DeploymentException("Port " + fixedPort + " is already in use");
             }
-            startProcess(runner, configuredPort);
+        }
+
+        if (configuredPort > 0 && configuredHttpsPort != 0) {
+            startProcess(running, runner, configuredPort, configuredHttpsPort);
             return;
         }
 
         for (int attempt = 1; ; attempt++) {
             try {
-                startProcess(runner, freePort());
+                int httpPort = configuredPort > 0 ? configuredPort : freePort(configuredHttpsPort);
+                startProcess(running, runner, httpPort, configuredHttpsPort == 0 ? freePort(httpPort) : configuredHttpsPort);
                 return;
             } catch (ApplicationExitedException e) {
                 if (attempt == FREE_PORT_ATTEMPTS) {
@@ -330,9 +402,12 @@ public class QuarkusManagedDeployableContainer implements DeployableContainer<Qu
     /**
      * Starts the application: a fast-jar with the JVM of the tests, a native executable directly. A native executable
      * takes the same {@code -D} and memory options.
+     *
+     * @param httpsPort the HTTPS port, or -1 for no HTTPS
      */
-    private void startProcess(Path runner, int port) throws Exception {
-        this.port = port;
+    private void startProcess(Application running, Path runner, int port, int httpsPort) throws Exception {
+        running.port = port;
+        running.httpsPort = httpsPort;
 
         boolean nativeExecutable = !runner.getFileName().toString().endsWith(".jar");
 
@@ -340,6 +415,11 @@ public class QuarkusManagedDeployableContainer implements DeployableContainer<Qu
         command.add(nativeExecutable ? runner.toString() : Path.of(System.getProperty("java.home"), "bin", "java").toString());
         command.addAll(configuration.getJavaVmArgumentList());
         command.add("-Dquarkus.http.port=" + port);
+        if (httpsPort > 0) {
+            command.add("-Dquarkus.http.ssl-port=" + httpsPort);
+            command.add("-Dquarkus.http.ssl.certificate.key-store-file=" + running.workDirectory.resolve("https.p12"));
+            command.add("-Dquarkus.http.ssl.certificate.key-store-password=" + KEY_STORE_PASSWORD);
+        }
         configuration.getSystemPropertyMap()
                 .forEach((key, value) -> command.add("-D" + key + "=" + value));
 
@@ -359,18 +439,19 @@ public class QuarkusManagedDeployableContainer implements DeployableContainer<Qu
 
         LOG.log(INFO, "Starting Quarkus application: {0}", String.join(" ", command));
 
-        process = new ProcessBuilder(command)
-                .directory(workDirectory.toFile())
+        Process process = new ProcessBuilder(command)
+                .directory(running.workDirectory.toFile())
                 .redirectErrorStream(true)
                 .start();
+        running.process = process;
 
         forwardOutput(process);
 
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(configuration.getStartupTimeoutInSeconds());
-        while (!isAcceptingConnections(port)) {
+        while (!isAcceptingConnections(port) || httpsPort > 0 && !isAcceptingConnections(httpsPort)) {
             if (!process.isAlive()) {
                 int exitValue = process.exitValue();
-                process = null;
+                running.process = null;
                 throw new ApplicationExitedException(exitValue);
             }
             if (System.nanoTime() > deadline) {
@@ -408,7 +489,8 @@ public class QuarkusManagedDeployableContainer implements DeployableContainer<Qu
                 .toString();
     }
 
-    private void stopProcess() {
+    private static void stopProcess(Application running) {
+        Process process = running.process;
         if (process == null) {
             return;
         }
@@ -423,27 +505,142 @@ public class QuarkusManagedDeployableContainer implements DeployableContainer<Qu
             process.destroyForcibly();
             Thread.currentThread().interrupt();
         }
-        process = null;
+        running.process = null;
     }
 
-    private void cleanUp() {
-        stopProcess();
+    private void cleanUp(Archive<?> archive, Application running) {
+        try {
+            cleanUp(running);
+        } finally {
+            applications.remove(archive);
+        }
+    }
 
-        if (workDirectory != null && !configuration.isKeepWorkDirectory()) {
-            try (Stream<Path> paths = Files.walk(workDirectory)) {
+    private void cleanUp(Application running) {
+        stopProcess(running);
+
+        if (running.workDirectory != null && !configuration.isKeepWorkDirectory()) {
+            try (Stream<Path> paths = Files.walk(running.workDirectory)) {
                 paths.sorted(Comparator.reverseOrder()).forEach(path -> path.toFile().delete());
             } catch (IOException e) {
                 throw new UncheckedIOException(e);
             }
         }
-        workDirectory = null;
+        running.workDirectory = null;
     }
 
-    /** A port that is free now, chosen by the operating system. */
-    private static int freePort() throws IOException {
-        try (ServerSocket socket = new ServerSocket(0)) {
-            return socket.getLocalPort();
+    private synchronized void addShutdownHook() {
+        if (shutdownHook == null) {
+            shutdownHook = new Thread(this::killApplications, "arquillian-quarkus-shutdown");
+            Runtime.getRuntime().addShutdownHook(shutdownHook);
         }
+    }
+
+    private synchronized void removeShutdownHook() {
+        if (shutdownHook != null) {
+            try {
+                Runtime.getRuntime().removeShutdownHook(shutdownHook);
+            } catch (IllegalStateException e) {
+                // The JVM is already exiting, and runs the hook
+            }
+            shutdownHook = null;
+        }
+    }
+
+    /**
+     * Kills the applications that are still running, and any processes they started, when the test JVM exits without
+     * undeploying them. Doesn't wait for them to stop; the JVM is exiting.
+     */
+    private void killApplications() {
+        for (Map.Entry<Archive<?>, Application> deployed : deployedApplications()) {
+            Process process = deployed.getValue().process;
+            if (process != null) {
+                process.descendants().forEach(ProcessHandle::destroyForcibly);
+                process.destroyForcibly();
+            }
+        }
+    }
+
+    /** A copy of the deployed applications, to iterate without holding their lock while stopping them. */
+    private List<Map.Entry<Archive<?>, Application>> deployedApplications() {
+        synchronized (applications) {
+            return applications.entrySet().stream()
+                    .<Map.Entry<Archive<?>, Application>>map(deployed -> Map.entry(deployed.getKey(), deployed.getValue()))
+                    .toList();
+        }
+    }
+
+    /** A deployed application: its process, ports and work directory. */
+    private static final class Application {
+
+        /** The name of the deployed archive */
+        final String name;
+
+        Path workDirectory;
+
+        /** Also read by the shutdown hook */
+        volatile Process process;
+
+        int port;
+
+        /** The HTTPS port of the application, or -1 for none */
+        int httpsPort = -1;
+
+        Application(String name) {
+            this.name = name;
+        }
+    }
+
+    /** A port that is free now, chosen by the operating system, other than the given one. */
+    private static int freePort(int otherPort) throws IOException {
+        while (true) {
+            try (ServerSocket socket = new ServerSocket(0)) {
+                if (socket.getLocalPort() != otherPort) {
+                    return socket.getLocalPort();
+                }
+            }
+        }
+    }
+
+    /**
+     * Creates a key store with a self-signed certificate for {@code localhost}, with the JDK's keytool.
+     */
+    private static void createKeyStore(Path keyStore) throws Exception {
+        List<String> command = List.of(
+                Path.of(System.getProperty("java.home"), "bin", "keytool").toString(),
+                "-genkeypair", "-noprompt",
+                "-alias", "localhost",
+                "-keyalg", "RSA", "-keysize", "2048",
+                "-validity", "3650",
+                "-dname", "CN=localhost",
+                "-ext", "SAN=dns:localhost,ip:127.0.0.1,ip:::1",
+                "-storetype", "PKCS12",
+                "-keystore", keyStore.toString(),
+                "-storepass", KEY_STORE_PASSWORD,
+                "-keypass", KEY_STORE_PASSWORD);
+
+        Process keytool = new ProcessBuilder(command).redirectErrorStream(true).start();
+        String output = new String(keytool.getInputStream().readAllBytes(), Charset.defaultCharset());
+        if (keytool.waitFor() != 0) {
+            throw new DeploymentException("Could not create a key store for HTTPS: " + output);
+        }
+    }
+
+    /**
+     * @return Arquillian's HTTPS context, which URLs injected with {@code @ArquillianResource @Secured} are taken from;
+     *         null if this version of Arquillian doesn't have it, which then takes the port of the annotation
+     */
+    private static HTTPContext createHttpsContext(String host, int port) throws ReflectiveOperationException {
+        Class<?> httpsContextClass;
+        try {
+            httpsContextClass = Class.forName(HTTPS_CONTEXT_CLASS, true, HTTPContext.class.getClassLoader());
+        } catch (ClassNotFoundException e) {
+            LOG.log(INFO, "This version of Arquillian has no HTTPS context; URLs injected with @Secured get the port"
+                    + " of the annotation instead of the HTTPS port {0}", String.valueOf(port));
+            return null;
+        }
+
+        return (HTTPContext) httpsContextClass.getConstructor(String.class, int.class).newInstance(host, port);
     }
 
     private static boolean isPortFree(int port) {

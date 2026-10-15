@@ -51,6 +51,15 @@ public class QuarkusManagedContainerConfiguration implements ContainerConfigurat
      */
     private int httpPort = Integer.parseInt(property("httpPort", "0"));
 
+    /**
+     * The HTTPS port of the application: -1 (the default) for no HTTPS, 0 for a free port per deployment, or a fixed
+     * port. The application gets a self-signed certificate for {@code localhost}, generated per deployment.
+     * <p>
+     * With Arquillian versions that know {@code HTTPSContext}, URLs injected with {@code @ArquillianResource @Secured}
+     * get this port. Older versions take the port from the {@code @Secured} annotation, so set this to that port.
+     */
+    private int httpsPort = Integer.parseInt(property("httpsPort", "-1"));
+
     /** Seconds to wait for the application to accept HTTP connections. */
     private int startupTimeoutInSeconds = Integer.parseInt(property("startupTimeoutInSeconds", "60"));
 
@@ -95,6 +104,12 @@ public class QuarkusManagedContainerConfiguration implements ContainerConfigurat
         }
         if (httpPort < 0) {
             throw new ConfigurationException("httpPort must be 0 (a free port) or positive, but was " + httpPort);
+        }
+        if (httpsPort < -1) {
+            throw new ConfigurationException("httpsPort must be -1 (no HTTPS), 0 (a free port) or positive, but was " + httpsPort);
+        }
+        if (httpPort > 0 && httpPort == httpsPort) {
+            throw new ConfigurationException("httpPort and httpsPort must differ, but both are " + httpPort);
         }
     }
 
@@ -162,6 +177,14 @@ public class QuarkusManagedContainerConfiguration implements ContainerConfigurat
 
     public void setHttpPort(int httpPort) {
         this.httpPort = httpPort;
+    }
+
+    public int getHttpsPort() {
+        return httpsPort;
+    }
+
+    public void setHttpsPort(int httpsPort) {
+        this.httpsPort = httpsPort;
     }
 
     public int getStartupTimeoutInSeconds() {

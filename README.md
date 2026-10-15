@@ -22,7 +22,11 @@ For every deployment, the container:
  * builds the application with the Quarkus bootstrap, using the configured extensions, with versions managed by the
    Quarkus BOM;
  * starts it on a free port (by default) and waits until it accepts connections;
- * stops it and removes its work directory when the deployment is undeployed.
+ * stops it and removes its work directory when the deployment is undeployed; an application that doesn't stop
+   within 20 seconds of being asked to is killed.
+
+A test class with several deployments runs each in its own application process, at the same time. Applications that
+are still running or starting when the test JVM exits without undeploying them (e.g. an interrupted run) are killed.
 
 The Quarkus bootstrap and its dependencies (Maven Resolver and so on) are embedded in the container jar and loaded in
 an isolated class loader, so they don't end up on the test class path.
@@ -113,6 +117,7 @@ All options are system properties with the prefix `arquillian.quarkus.` (as abov
 | `dependencies` | `io.quarkus:quarkus-undertow` | Extensions and libraries the application is built with, as `groupId:artifactId[:version]`, separated by commas or whitespace. The version may be left out for artifacts managed by the Quarkus BOM. |
 | `quarkusVersion` | the bootstrap's version | Version of the Quarkus BOM that manages the dependency versions. |
 | `httpPort` | `0` | HTTP port of the application; `0` takes a free port per deployment, so test runs can run in parallel. |
+| `httpsPort` | `-1` | HTTPS port of the application, with a self-signed certificate for `localhost` generated per deployment; `-1` is no HTTPS, `0` takes a free port per deployment. With an Arquillian version that has `HTTPSContext` (proposed for 1.11), URLs injected with `@ArquillianResource @Secured` get this port. Other versions take the port from the `@Secured` annotation, so set it to that port, e.g. `8181`. |
 | `startupTimeoutInSeconds` | `60` | Seconds to wait for the application to accept connections. |
 | `javaVmArguments` | | Extra arguments for the application JVM (or native executable), separated by whitespace. |
 | `systemProperties` | | System properties for the application, one `key=value` per line. |

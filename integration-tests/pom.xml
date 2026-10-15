@@ -22,6 +22,7 @@
         <module>helloworld-jvm</module>
         <module>helloworld-war-jvm</module>
         <module>helloworld-faces-jvm</module>
+        <module>multiple-deployments-jvm</module>
     </modules>
 
     <profiles>
